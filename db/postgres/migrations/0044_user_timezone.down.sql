@@ -1,4 +1,4 @@
 -- 0044_user_timezone
--- Remove the timezone column from users.
+-- Remove the timezone column from iam_users.
 
-ALTER TABLE users DROP COLUMN IF EXISTS timezone;
+ALTER TABLE iam_users DROP COLUMN IF EXISTS timezone;

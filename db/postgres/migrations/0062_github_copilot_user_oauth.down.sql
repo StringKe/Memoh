@@ -2,7 +2,7 @@
 -- Remove user-scoped provider OAuth tokens and github-copilot client type.
 
 DROP INDEX IF EXISTS idx_user_provider_oauth_tokens_state;
-DROP TABLE IF EXISTS user_provider_oauth_tokens;
+DROP TABLE IF EXISTS iam_user_provider_oauth_tokens;
 
 DELETE FROM providers WHERE client_type = 'github-copilot';
 

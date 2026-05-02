@@ -3,7 +3,7 @@
 
 PRAGMA foreign_keys = OFF;
 
-DROP TABLE IF EXISTS user_provider_oauth_tokens;
+DROP TABLE IF EXISTS iam_user_provider_oauth_tokens;
 DROP TABLE IF EXISTS provider_oauth_tokens;
 DROP TABLE IF EXISTS email_outbox;
 DROP TABLE IF EXISTS bot_email_bindings;
@@ -25,7 +25,7 @@ DROP TABLE IF EXISTS bot_history_messages;
 DROP TABLE IF EXISTS bot_session_events;
 DROP TABLE IF EXISTS bot_sessions;
 DROP TABLE IF EXISTS bot_channel_routes;
-DROP TABLE IF EXISTS channel_identity_bind_codes;
+DROP TABLE IF EXISTS iam_channel_identity_bind_codes;
 DROP TABLE IF EXISTS bot_channel_configs;
 DROP TABLE IF EXISTS mcp_oauth_tokens;
 DROP TABLE IF EXISTS mcp_connections;
@@ -37,8 +37,19 @@ DROP TABLE IF EXISTS model_variants;
 DROP TABLE IF EXISTS models;
 DROP TABLE IF EXISTS search_providers;
 DROP TABLE IF EXISTS providers;
-DROP TABLE IF EXISTS user_channel_bindings;
-DROP TABLE IF EXISTS channel_identities;
-DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS iam_sso_group_mappings;
+DROP TABLE IF EXISTS iam_principal_roles;
+DROP TABLE IF EXISTS iam_role_permissions;
+DROP TABLE IF EXISTS iam_group_members;
+DROP TABLE IF EXISTS iam_login_codes;
+DROP TABLE IF EXISTS iam_sessions;
+DROP TABLE IF EXISTS iam_identities;
+DROP TABLE IF EXISTS iam_groups;
+DROP TABLE IF EXISTS iam_roles;
+DROP TABLE IF EXISTS iam_permissions;
+DROP TABLE IF EXISTS iam_sso_providers;
+DROP TABLE IF EXISTS iam_user_channel_bindings;
+DROP TABLE IF EXISTS iam_channel_identities;
+DROP TABLE IF EXISTS iam_users;
 
 PRAGMA foreign_keys = ON;

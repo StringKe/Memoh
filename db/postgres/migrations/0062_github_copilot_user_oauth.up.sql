@@ -16,10 +16,10 @@ ALTER TABLE IF EXISTS providers
     )
   );
 
-CREATE TABLE IF NOT EXISTS user_provider_oauth_tokens (
+CREATE TABLE IF NOT EXISTS iam_user_provider_oauth_tokens (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   provider_id UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
   access_token TEXT NOT NULL DEFAULT '',
   refresh_token TEXT NOT NULL DEFAULT '',
   expires_at TIMESTAMPTZ,
@@ -34,5 +34,5 @@ CREATE TABLE IF NOT EXISTS user_provider_oauth_tokens (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_provider_oauth_tokens_state
-  ON user_provider_oauth_tokens(state)
+  ON iam_user_provider_oauth_tokens(state)
   WHERE state != '';

@@ -464,7 +464,7 @@ func ruleFromListRow(row sqlc.ListBotACLRulesRow) Rule {
 	return rule
 }
 
-func ruleFromWrite(row sqlc.CreateBotACLRuleRow) Rule {
+func ruleFromWrite(row sqlc.BotAclRule) Rule {
 	rule := Rule{
 		ID:                 uuid.UUID(row.ID.Bytes).String(),
 		BotID:              uuid.UUID(row.BotID.Bytes).String(),
@@ -485,7 +485,7 @@ func ruleFromWrite(row sqlc.CreateBotACLRuleRow) Rule {
 	return rule
 }
 
-func ruleFromUpdateRow(row sqlc.UpdateBotACLRuleRow) Rule {
+func ruleFromUpdateRow(row sqlc.BotAclRule) Rule {
 	rule := Rule{
 		ID:                 uuid.UUID(row.ID.Bytes).String(),
 		BotID:              uuid.UUID(row.BotID.Bytes).String(),

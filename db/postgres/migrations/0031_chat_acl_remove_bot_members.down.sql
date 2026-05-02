@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS bot_preauth_keys (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bot_id UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
   token TEXT NOT NULL,
-  issued_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  issued_by_user_id UUID REFERENCES iam_users(id) ON DELETE SET NULL,
   expires_at TIMESTAMPTZ,
   used_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_bot_preauth_keys_expires ON bot_preauth_keys(expi
 
 CREATE TABLE IF NOT EXISTS bot_members (
   bot_id UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
   role TEXT NOT NULL DEFAULT 'member',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT bot_members_role_check CHECK (role IN ('owner', 'admin', 'member')),

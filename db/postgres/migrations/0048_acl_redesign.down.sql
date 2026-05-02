@@ -13,7 +13,7 @@ END $$;
 
 -- Restore user_id column
 ALTER TABLE bot_acl_rules
-  ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+  ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES iam_users(id) ON DELETE CASCADE;
 
 CREATE INDEX IF NOT EXISTS idx_bot_acl_rules_user_id ON bot_acl_rules(user_id);
 

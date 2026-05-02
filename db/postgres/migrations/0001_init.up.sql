@@ -1,20 +1,10 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
-    CREATE TYPE user_role AS ENUM ('member', 'admin');
-  END IF;
-END
-$$;
-
--- users: Memoh user principal
-CREATE TABLE IF NOT EXISTS users (
+-- iam_users: Memoh user principal
+CREATE TABLE IF NOT EXISTS iam_users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   username TEXT,
   email TEXT,
-  password_hash TEXT,
-  role user_role NOT NULL DEFAULT 'member',
   display_name TEXT,
   avatar_url TEXT,
   timezone TEXT NOT NULL DEFAULT 'UTC',
@@ -24,14 +14,17 @@ CREATE TABLE IF NOT EXISTS users (
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT users_email_unique UNIQUE (email),
-  CONSTRAINT users_username_unique UNIQUE (username)
+  CONSTRAINT iam_users_username_unique UNIQUE (username)
 );
 
--- channel_identities: unified inbound identity subject
-CREATE TABLE IF NOT EXISTS channel_identities (
+CREATE UNIQUE INDEX IF NOT EXISTS idx_iam_users_email_unique
+  ON iam_users(email)
+  WHERE email IS NOT NULL AND email <> '';
+
+-- iam_channel_identities: unified inbound identity subject
+CREATE TABLE IF NOT EXISTS iam_channel_identities (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  user_id UUID REFERENCES iam_users(id) ON DELETE SET NULL,
   channel_type TEXT NOT NULL,
   channel_subject_id TEXT NOT NULL,
   display_name TEXT,
@@ -42,12 +35,12 @@ CREATE TABLE IF NOT EXISTS channel_identities (
   CONSTRAINT channel_identities_channel_type_subject_unique UNIQUE (channel_type, channel_subject_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_channel_identities_user_id ON channel_identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_channel_identities_user_id ON iam_channel_identities(user_id);
 
--- user_channel_bindings: outbound delivery config
-CREATE TABLE IF NOT EXISTS user_channel_bindings (
+-- iam_user_channel_bindings: outbound delivery config
+CREATE TABLE IF NOT EXISTS iam_user_channel_bindings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
   channel_type TEXT NOT NULL,
   config JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -55,7 +48,203 @@ CREATE TABLE IF NOT EXISTS user_channel_bindings (
   CONSTRAINT user_channel_bindings_unique UNIQUE (user_id, channel_type)
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_channel_bindings_user_id ON user_channel_bindings(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_channel_bindings_user_id ON iam_user_channel_bindings(user_id);
+
+CREATE TABLE IF NOT EXISTS iam_sso_providers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  type TEXT NOT NULL,
+  key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  attribute_mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
+  jit_enabled BOOLEAN NOT NULL DEFAULT true,
+  email_linking_policy TEXT NOT NULL DEFAULT 'link_existing',
+  trust_email BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_sso_providers_type_check CHECK (type IN ('oidc', 'saml')),
+  CONSTRAINT iam_sso_providers_key_unique UNIQUE (key),
+  CONSTRAINT iam_sso_providers_email_linking_policy_check CHECK (email_linking_policy IN ('link_existing', 'reject_existing'))
+);
+
+CREATE TABLE IF NOT EXISTS iam_identities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
+  provider_type TEXT NOT NULL,
+  provider_id UUID REFERENCES iam_sso_providers(id) ON DELETE CASCADE,
+  subject TEXT NOT NULL,
+  credential_secret TEXT,
+  email TEXT,
+  username TEXT,
+  display_name TEXT,
+  avatar_url TEXT,
+  raw_claims JSONB NOT NULL DEFAULT '{}'::jsonb,
+  last_login_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_identities_provider_type_check CHECK (provider_type IN ('password', 'oidc', 'saml', 'channel')),
+  CONSTRAINT iam_identities_password_provider_check CHECK (
+    (provider_type = 'password' AND provider_id IS NULL AND credential_secret IS NOT NULL)
+    OR provider_type <> 'password'
+  ),
+  CONSTRAINT iam_identities_provider_subject_unique UNIQUE NULLS NOT DISTINCT (provider_type, provider_id, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_iam_identities_user_id ON iam_identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_iam_identities_email ON iam_identities(email) WHERE email IS NOT NULL AND email <> '';
+
+CREATE TABLE IF NOT EXISTS iam_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
+  identity_id UUID REFERENCES iam_identities(id) ON DELETE SET NULL,
+  issued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ,
+  ip_address TEXT,
+  user_agent TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_iam_sessions_user_id ON iam_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_iam_sessions_active ON iam_sessions(user_id, expires_at) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS iam_login_codes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code_hash TEXT NOT NULL,
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
+  identity_id UUID REFERENCES iam_identities(id) ON DELETE SET NULL,
+  session_id UUID NOT NULL REFERENCES iam_sessions(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_login_codes_code_hash_unique UNIQUE (code_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_iam_login_codes_expires_at ON iam_login_codes(expires_at);
+
+CREATE TABLE IF NOT EXISTS iam_groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'local',
+  external_id TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_groups_key_unique UNIQUE (key),
+  CONSTRAINT iam_groups_source_check CHECK (source IN ('local', 'sso', 'scim'))
+);
+
+CREATE TABLE IF NOT EXISTS iam_group_members (
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
+  group_id UUID NOT NULL REFERENCES iam_groups(id) ON DELETE CASCADE,
+  source TEXT NOT NULL DEFAULT 'manual',
+  provider_id UUID REFERENCES iam_sso_providers(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_group_members_source_check CHECK (source IN ('manual', 'sso', 'scim')),
+  CONSTRAINT iam_group_members_unique UNIQUE NULLS NOT DISTINCT (user_id, group_id, source, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_iam_group_members_user_id ON iam_group_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_iam_group_members_group_id ON iam_group_members(group_id);
+
+CREATE TABLE IF NOT EXISTS iam_permissions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  is_system BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_permissions_key_unique UNIQUE (key)
+);
+
+CREATE TABLE IF NOT EXISTS iam_roles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  is_system BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_roles_key_unique UNIQUE (key),
+  CONSTRAINT iam_roles_scope_check CHECK (scope IN ('system', 'bot'))
+);
+
+CREATE TABLE IF NOT EXISTS iam_role_permissions (
+  role_id UUID NOT NULL REFERENCES iam_roles(id) ON DELETE CASCADE,
+  permission_id UUID NOT NULL REFERENCES iam_permissions(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (role_id, permission_id)
+);
+
+CREATE TABLE IF NOT EXISTS iam_principal_roles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  principal_type TEXT NOT NULL,
+  principal_id UUID NOT NULL,
+  role_id UUID NOT NULL REFERENCES iam_roles(id) ON DELETE CASCADE,
+  resource_type TEXT NOT NULL,
+  resource_id UUID,
+  source TEXT NOT NULL DEFAULT 'manual',
+  provider_id UUID REFERENCES iam_sso_providers(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_principal_roles_principal_type_check CHECK (principal_type IN ('user', 'group')),
+  CONSTRAINT iam_principal_roles_resource_type_check CHECK (resource_type IN ('system', 'bot')),
+  CONSTRAINT iam_principal_roles_source_check CHECK (source IN ('system', 'manual', 'sso', 'scim')),
+  CONSTRAINT iam_principal_roles_resource_id_check CHECK (
+    (resource_type = 'system' AND resource_id IS NULL)
+    OR resource_type = 'bot'
+  ),
+  CONSTRAINT iam_principal_roles_unique UNIQUE NULLS NOT DISTINCT (
+    principal_type, principal_id, role_id, resource_type, resource_id, source, provider_id
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_iam_principal_roles_user ON iam_principal_roles(principal_id) WHERE principal_type = 'user';
+CREATE INDEX IF NOT EXISTS idx_iam_principal_roles_group ON iam_principal_roles(principal_id) WHERE principal_type = 'group';
+CREATE INDEX IF NOT EXISTS idx_iam_principal_roles_resource ON iam_principal_roles(resource_type, resource_id);
+
+CREATE TABLE IF NOT EXISTS iam_sso_group_mappings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider_id UUID NOT NULL REFERENCES iam_sso_providers(id) ON DELETE CASCADE,
+  external_group TEXT NOT NULL,
+  group_id UUID NOT NULL REFERENCES iam_groups(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT iam_sso_group_mappings_unique UNIQUE (provider_id, external_group)
+);
+CREATE INDEX IF NOT EXISTS idx_iam_sso_group_mappings_group_id ON iam_sso_group_mappings(group_id);
+
+INSERT INTO iam_permissions (key, description, is_system)
+VALUES
+  ('system.login', 'Log in to the system', true),
+  ('system.admin', 'Administer the system', true),
+  ('bot.read', 'Read bot data', true),
+  ('bot.chat', 'Chat with bot', true),
+  ('bot.update', 'Update bot configuration', true),
+  ('bot.delete', 'Delete bot', true),
+  ('bot.permissions.manage', 'Manage bot permissions', true)
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO iam_roles (key, scope, description, is_system)
+VALUES
+  ('member', 'system', 'Default authenticated user', true),
+  ('admin', 'system', 'System administrator', true),
+  ('bot_viewer', 'bot', 'Bot viewer', true),
+  ('bot_operator', 'bot', 'Bot operator', true),
+  ('bot_owner', 'bot', 'Bot owner', true)
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO iam_role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM iam_roles r
+JOIN iam_permissions p ON (
+  (r.key = 'member' AND p.key IN ('system.login')) OR
+  (r.key = 'admin' AND p.key IN ('system.login', 'system.admin')) OR
+  (r.key = 'bot_viewer' AND p.key IN ('bot.read', 'bot.chat')) OR
+  (r.key = 'bot_operator' AND p.key IN ('bot.read', 'bot.chat', 'bot.update')) OR
+  (r.key = 'bot_owner' AND p.key IN ('bot.read', 'bot.chat', 'bot.update', 'bot.delete', 'bot.permissions.manage'))
+)
+ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS providers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -151,13 +340,14 @@ CREATE TABLE IF NOT EXISTS browser_contexts (
 
 CREATE TABLE IF NOT EXISTS bots (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  owner_user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
   type TEXT NOT NULL,
   display_name TEXT,
   avatar_url TEXT,
   timezone TEXT,
   is_active BOOLEAN NOT NULL DEFAULT true,
   status TEXT NOT NULL DEFAULT 'ready',
+  acl_default_effect TEXT NOT NULL DEFAULT 'allow',
   language TEXT NOT NULL DEFAULT 'auto',
   reasoning_enabled BOOLEAN NOT NULL DEFAULT false,
   reasoning_effort TEXT NOT NULL DEFAULT 'medium',
@@ -189,6 +379,7 @@ CREATE TABLE IF NOT EXISTS bots (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT bots_type_check CHECK (type IN ('personal', 'public')),
   CONSTRAINT bots_status_check CHECK (status IN ('creating', 'ready', 'deleting')),
+  CONSTRAINT bots_acl_default_effect_check CHECK (acl_default_effect IN ('allow', 'deny')),
   CONSTRAINT bots_reasoning_effort_check CHECK (reasoning_effort IN ('low', 'medium', 'high'))
 );
 
@@ -197,21 +388,24 @@ CREATE INDEX IF NOT EXISTS idx_bots_owner_user_id ON bots(owner_user_id);
 CREATE TABLE IF NOT EXISTS bot_acl_rules (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bot_id UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  priority INTEGER NOT NULL DEFAULT 100,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  description TEXT,
   action TEXT NOT NULL,
   effect TEXT NOT NULL,
   subject_kind TEXT NOT NULL,
-  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-  channel_identity_id UUID REFERENCES channel_identities(id) ON DELETE CASCADE,
+  channel_identity_id UUID REFERENCES iam_channel_identities(id) ON DELETE CASCADE,
+  subject_channel_type TEXT,
   source_channel TEXT,
   source_conversation_type TEXT,
   source_conversation_id TEXT,
   source_thread_id TEXT,
-  created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_by_user_id UUID REFERENCES iam_users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT bot_acl_rules_action_check CHECK (action IN ('chat.trigger')),
   CONSTRAINT bot_acl_rules_effect_check CHECK (effect IN ('allow', 'deny')),
-  CONSTRAINT bot_acl_rules_subject_kind_check CHECK (subject_kind IN ('guest_all', 'user', 'channel_identity')),
+  CONSTRAINT bot_acl_rules_subject_kind_check CHECK (subject_kind IN ('all', 'channel_identity', 'channel_type')),
   CONSTRAINT bot_acl_rules_source_conversation_type_check CHECK (
     source_conversation_type IS NULL OR source_conversation_type IN ('private', 'group', 'thread')
   ),
@@ -223,23 +417,21 @@ CREATE TABLE IF NOT EXISTS bot_acl_rules (
     source_thread_id IS NULL OR source_conversation_id IS NOT NULL
   ),
   CONSTRAINT bot_acl_rules_subject_value_check CHECK (
-    (subject_kind = 'guest_all' AND user_id IS NULL AND channel_identity_id IS NULL) OR
-    (subject_kind = 'user' AND user_id IS NOT NULL AND channel_identity_id IS NULL) OR
-    (subject_kind = 'channel_identity' AND user_id IS NULL AND channel_identity_id IS NOT NULL)
-  ),
-  CONSTRAINT bot_acl_rules_unique_user UNIQUE NULLS NOT DISTINCT (
-    bot_id, action, effect, subject_kind, user_id,
-    source_channel, source_conversation_type, source_conversation_id, source_thread_id
+    (subject_kind = 'all' AND channel_identity_id IS NULL AND subject_channel_type IS NULL) OR
+    (subject_kind = 'channel_identity' AND channel_identity_id IS NOT NULL AND subject_channel_type IS NULL) OR
+    (subject_kind = 'channel_type' AND channel_identity_id IS NULL AND subject_channel_type IS NOT NULL)
   ),
   CONSTRAINT bot_acl_rules_unique_channel_identity UNIQUE NULLS NOT DISTINCT (
     bot_id, action, effect, subject_kind, channel_identity_id,
-    source_channel, source_conversation_type, source_conversation_id, source_thread_id
+    source_conversation_type, source_conversation_id, source_thread_id
   )
 );
 
 CREATE INDEX IF NOT EXISTS idx_bot_acl_rules_bot_id ON bot_acl_rules(bot_id);
-CREATE INDEX IF NOT EXISTS idx_bot_acl_rules_user_id ON bot_acl_rules(user_id);
 CREATE INDEX IF NOT EXISTS idx_bot_acl_rules_channel_identity_id ON bot_acl_rules(channel_identity_id);
+CREATE INDEX IF NOT EXISTS idx_bot_acl_rules_subject_channel_type ON bot_acl_rules(subject_channel_type);
+CREATE INDEX IF NOT EXISTS idx_bot_acl_rules_bot_priority ON bot_acl_rules(bot_id, priority ASC, created_at ASC)
+  WHERE enabled = true;
 
 CREATE TABLE IF NOT EXISTS mcp_connections (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -310,20 +502,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_channel_external_identity
 
 CREATE INDEX IF NOT EXISTS idx_bot_channel_bot_id ON bot_channel_configs(bot_id);
 
--- channel_identity_bind_codes: one-time codes for channel identity->user linking
-CREATE TABLE IF NOT EXISTS channel_identity_bind_codes (
+-- iam_channel_identity_bind_codes: one-time codes for channel identity->user linking
+CREATE TABLE IF NOT EXISTS iam_channel_identity_bind_codes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   token TEXT NOT NULL,
-  issued_by_user_id UUID NOT NULL REFERENCES users(id),
+  issued_by_user_id UUID NOT NULL REFERENCES iam_users(id),
   channel_type TEXT,
   expires_at TIMESTAMPTZ,
   used_at TIMESTAMPTZ,
-  used_by_channel_identity_id UUID REFERENCES channel_identities(id),
+  used_by_channel_identity_id UUID REFERENCES iam_channel_identities(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT channel_identity_bind_codes_token_unique UNIQUE (token)
 );
 
-CREATE INDEX IF NOT EXISTS idx_channel_identity_bind_codes_channel_type ON channel_identity_bind_codes(channel_type);
+CREATE INDEX IF NOT EXISTS idx_channel_identity_bind_codes_channel_type ON iam_channel_identity_bind_codes(channel_type);
 
 -- bot_channel_routes: route mapping for inbound channel threads to bot history.
 CREATE TABLE IF NOT EXISTS bot_channel_routes (
@@ -394,8 +586,8 @@ CREATE TABLE IF NOT EXISTS bot_history_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bot_id UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
   session_id UUID REFERENCES bot_sessions(id) ON DELETE SET NULL,
-  sender_channel_identity_id UUID REFERENCES channel_identities(id),
-  sender_account_user_id UUID REFERENCES users(id),
+  sender_channel_identity_id UUID REFERENCES iam_channel_identities(id),
+  sender_account_user_id UUID REFERENCES iam_users(id),
   source_message_id TEXT,
   source_reply_to_message_id TEXT,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
@@ -423,15 +615,15 @@ CREATE TABLE IF NOT EXISTS tool_approval_requests (
   bot_id UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
   session_id UUID NOT NULL REFERENCES bot_sessions(id) ON DELETE CASCADE,
   route_id UUID REFERENCES bot_channel_routes(id) ON DELETE SET NULL,
-  channel_identity_id UUID REFERENCES channel_identities(id) ON DELETE SET NULL,
+  channel_identity_id UUID REFERENCES iam_channel_identities(id) ON DELETE SET NULL,
   tool_call_id TEXT NOT NULL,
   tool_name TEXT NOT NULL,
   tool_input JSONB NOT NULL,
   short_id INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   decision_reason TEXT NOT NULL DEFAULT '',
-  requested_by_channel_identity_id UUID REFERENCES channel_identities(id) ON DELETE SET NULL,
-  decided_by_channel_identity_id UUID REFERENCES channel_identities(id) ON DELETE SET NULL,
+  requested_by_channel_identity_id UUID REFERENCES iam_channel_identities(id) ON DELETE SET NULL,
+  decided_by_channel_identity_id UUID REFERENCES iam_channel_identities(id) ON DELETE SET NULL,
   requested_message_id UUID REFERENCES bot_history_messages(id) ON DELETE SET NULL,
   prompt_message_id UUID REFERENCES bot_history_messages(id) ON DELETE SET NULL,
   prompt_external_message_id TEXT NOT NULL DEFAULT '',
@@ -709,11 +901,11 @@ CREATE TABLE IF NOT EXISTS provider_oauth_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_provider_oauth_tokens_state ON provider_oauth_tokens(state) WHERE state != '';
 
--- user_provider_oauth_tokens: per-user OAuth2 tokens for providers with user-scoped auth (e.g. GitHub Copilot)
-CREATE TABLE IF NOT EXISTS user_provider_oauth_tokens (
+-- iam_user_provider_oauth_tokens: per-user OAuth2 tokens for providers with user-scoped auth (e.g. GitHub Copilot)
+CREATE TABLE IF NOT EXISTS iam_user_provider_oauth_tokens (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   provider_id UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
   access_token TEXT NOT NULL DEFAULT '',
   refresh_token TEXT NOT NULL DEFAULT '',
   expires_at TIMESTAMPTZ,
@@ -727,4 +919,4 @@ CREATE TABLE IF NOT EXISTS user_provider_oauth_tokens (
   CONSTRAINT user_provider_oauth_tokens_provider_user_unique UNIQUE (provider_id, user_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_provider_oauth_tokens_state ON user_provider_oauth_tokens(state) WHERE state != '';
+CREATE INDEX IF NOT EXISTS idx_user_provider_oauth_tokens_state ON iam_user_provider_oauth_tokens(state) WHERE state != '';
